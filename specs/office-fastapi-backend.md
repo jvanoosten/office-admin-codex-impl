@@ -42,11 +42,11 @@ async def lifespan(app: FastAPI):
     document_worker = DocumentWorker()
     printer_worker = PrinterWorker()
     mail_worker = MailWorker()
-    office_worker = OfficeAdmin(calendar_worker, document_worker, printer_worker, mail_worker)
-    app.state.office_worker = office_worker
+    office_admin = OfficeAdmin(calendar_worker, document_worker, printer_worker, mail_worker)
+    app.state.office_admin = office_admin
     yield
     # shutdown: OfficeAdmin first, then workers in reverse startup order
-    await office_worker.shutdown()
+    await office_admin.shutdown()
     await mail_worker.shutdown()
     await printer_worker.shutdown()
     await document_worker.shutdown()
@@ -187,7 +187,7 @@ class StatusResponse(BaseModel):
     skipped_event_ids: list[str]
 ```
 
-Using Pydantic's `date` type for `selected_date` in the request model automatically validates the ISO 8601 format and returns 422 for invalid input. The route may also explicitly return 400 for clarity.
+Using Pydantic's `date` type for `selected_date` in the request model automatically validates the ISO 8601 format and returns 422 for invalid input.
 
 `StatusResponse` is a flat model containing fields for all task types. Fields from the non-applicable task type will be `0` or `[]` as initialized by `make_task_entry`.
 
@@ -220,10 +220,10 @@ Using Pydantic's `date` type for `selected_date` in the request model automatica
 
 ## Test Plan
 1. `POST /api/office/print-calendar-events` with valid date → 202 and request ID
-2. `POST /api/office/print-calendar-events` with invalid date → 400
+2. `POST /api/office/print-calendar-events` with invalid date → 422
 3. `POST /api/office/print-calendar-events` with queue full → 429
 4. `POST /api/office/send-email-notifications` with valid date → 202 and request ID
-5. `POST /api/office/send-email-notifications` with invalid date → 400
+5. `POST /api/office/send-email-notifications` with invalid date → 422
 6. `POST /api/office/send-email-notifications` with queue full → 429
 7. `GET /api/office/status/{id}` with valid ID → 200 and status payload
 8. `GET /api/office/status/{unknown}` → 404 with UNKNOWN status

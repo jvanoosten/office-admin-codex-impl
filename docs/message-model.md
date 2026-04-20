@@ -129,7 +129,7 @@ Additional fields for `SEND_EMAIL_NOTIFICATIONS` tasks:
     # Email draft progress
     "emails_expected": int,       # 0 until calendar complete
     "emails_completed": int,
-    "emails_skipped": int,        # events with no mailto: recipients (normal outcome)
+    "emails_skipped": int,        # events with no extracted email recipients (normal outcome)
     "emails_failed": int,
     "draft_ids": list[str],       # Gmail API draft IDs of created drafts
     "skipped_event_ids": list[str],  # event IDs of skipped events
