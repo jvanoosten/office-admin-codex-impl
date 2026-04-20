@@ -9,12 +9,14 @@ from office_admin.models import (
     CANCELLED,
     COMPLETED,
     CREATING_EVENT_PDFS,
+    CREATING_EMAIL_DRAFTS,
     ERROR,
     GETTING_CALENDAR_EVENTS,
     PRINT_CALENDAR_EVENTS,
     PRINTING_EVENT_PDFS,
+    SEND_EMAIL_NOTIFICATIONS,
 )
-from tests.fakes import FakeCalendarWorker, FakeDocumentWorker, FakePrinterWorker, PassiveWorker
+from tests.fakes import FakeCalendarWorker, FakeDocumentWorker, FakeMailWorker, FakePrinterWorker, PassiveWorker
 
 
 @pytest.fixture
@@ -22,7 +24,7 @@ async def admin_context() -> tuple[OfficeAdmin, FakeCalendarWorker, FakeDocument
     calendar_worker = FakeCalendarWorker()
     document_worker = FakeDocumentWorker()
     printer_worker = FakePrinterWorker()
-    mail_worker = PassiveWorker()
+    mail_worker = FakeMailWorker()
     admin = OfficeAdmin(calendar_worker, document_worker, printer_worker, mail_worker)
     yield admin, calendar_worker, document_worker, printer_worker, mail_worker
     await admin.shutdown()
@@ -302,7 +304,7 @@ async def test_cancel_completed_task_is_no_op(admin_context) -> None:
 @pytest.mark.asyncio
 async def test_queue_full_raises() -> None:
     calendar_worker = FakeCalendarWorker()
-    admin = OfficeAdmin(calendar_worker, FakeDocumentWorker(), FakePrinterWorker(), PassiveWorker())
+    admin = OfficeAdmin(calendar_worker, FakeDocumentWorker(), FakePrinterWorker(), FakeMailWorker())
     try:
         for _ in range(10):
             admin.submit_print_calendar_events("2026-04-21")
@@ -310,3 +312,164 @@ async def test_queue_full_raises() -> None:
             admin.submit_print_calendar_events("2026-04-22")
     finally:
         await admin.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_submit_send_email_notifications_transitions_to_running(admin_context) -> None:
+    admin, calendar_worker, _, _, _ = admin_context
+    request_id = admin.submit_send_email_notifications("2026-04-22")
+    await asyncio.sleep(0)
+
+    status = admin.get_status(request_id)
+    assert status["task_type"] == SEND_EMAIL_NOTIFICATIONS
+    assert status["status"] == "RUNNING"
+    assert status["stage"] == GETTING_CALENDAR_EVENTS
+    assert calendar_worker.requests[0][1:] == (request_id, "2026-04-22")
+
+
+@pytest.mark.asyncio
+async def test_email_calendar_completion_dispatches_mail_jobs(admin_context) -> None:
+    admin, _, _, _, mail_worker = admin_context
+    request_id = admin.submit_send_email_notifications("2026-04-22")
+    await asyncio.sleep(0)
+    events = [
+        {"id": "evt-1", "description": "a@example.com", "start": "2026-04-22T09:00:00-05:00", "end": "2026-04-22T10:00:00-05:00"},
+        {"id": "evt-2", "description": "b@example.com", "start": "2026-04-22T11:00:00-05:00", "end": "2026-04-22T12:00:00-05:00"},
+    ]
+
+    await admin.calendar_events_complete(request_id, "2026-04-22", events)
+
+    status = admin.get_status(request_id)
+    assert status["status"] == "RUNNING"
+    assert status["stage"] == CREATING_EMAIL_DRAFTS
+    assert status["emails_expected"] == 2
+    assert len(mail_worker.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_email_task_completes_when_all_drafts_complete(admin_context) -> None:
+    admin, _, _, _, _ = admin_context
+    request_id = admin.submit_send_email_notifications("2026-04-22")
+    await asyncio.sleep(0)
+    events = [
+        {"id": "evt-1", "description": "a@example.com", "start": "2026-04-22T09:00:00-05:00", "end": "2026-04-22T10:00:00-05:00"},
+        {"id": "evt-2", "description": "b@example.com", "start": "2026-04-22T11:00:00-05:00", "end": "2026-04-22T12:00:00-05:00"},
+    ]
+    await admin.calendar_events_complete(request_id, "2026-04-22", events)
+    await admin.email_draft_complete(request_id, "evt-1", "draft-1")
+    mid_status = admin.get_status(request_id)
+    assert mid_status["status"] == "RUNNING"
+    assert mid_status["emails_completed"] == 1
+    await admin.email_draft_complete(request_id, "evt-2", "draft-2")
+
+    final_status = admin.get_status(request_id)
+    assert final_status["status"] == COMPLETED
+    assert final_status["stage"] == COMPLETED
+    assert final_status["draft_ids"] == ["draft-1", "draft-2"]
+
+
+@pytest.mark.asyncio
+async def test_email_task_all_skipped_completes(admin_context) -> None:
+    admin, _, _, _, _ = admin_context
+    request_id = admin.submit_send_email_notifications("2026-04-22")
+    await asyncio.sleep(0)
+    events = [
+        {"id": "evt-1", "description": "", "start": "2026-04-22T09:00:00-05:00", "end": "2026-04-22T10:00:00-05:00"},
+        {"id": "evt-2", "description": "", "start": "2026-04-22T11:00:00-05:00", "end": "2026-04-22T12:00:00-05:00"},
+    ]
+    await admin.calendar_events_complete(request_id, "2026-04-22", events)
+    await admin.email_draft_skipped(request_id, "evt-1")
+    await admin.email_draft_skipped(request_id, "evt-2")
+
+    status = admin.get_status(request_id)
+    assert status["status"] == COMPLETED
+    assert status["emails_skipped"] == 2
+    assert status["skipped_event_ids"] == ["evt-1", "evt-2"]
+
+
+@pytest.mark.asyncio
+async def test_email_task_failure_marks_error_and_propagates_cancel(admin_context) -> None:
+    admin, calendar_worker, document_worker, printer_worker, mail_worker = admin_context
+    request_id = admin.submit_send_email_notifications("2026-04-22")
+    await asyncio.sleep(0)
+    await admin.calendar_events_complete(
+        request_id,
+        "2026-04-22",
+        [{"id": "evt-1", "description": "a@example.com", "start": "2026-04-22T09:00:00-05:00", "end": "2026-04-22T10:00:00-05:00"}],
+    )
+    await admin.email_draft_failed(request_id, "evt-1", "gmail down")
+
+    status = admin.get_status(request_id)
+    assert status["status"] == ERROR
+    assert status["stage"] == ERROR
+    assert status["errors"] == ["gmail down"]
+    assert request_id in calendar_worker.cancelled
+    assert request_id in document_worker.cancelled
+    assert request_id in printer_worker.cancelled
+    assert request_id in mail_worker.cancelled
+
+
+@pytest.mark.asyncio
+async def test_email_task_cancel_during_getting_calendar_events(admin_context) -> None:
+    admin, _, _, _, _ = admin_context
+    request_id = admin.submit_send_email_notifications("2026-04-22")
+    await asyncio.sleep(0)
+    admin.cancel_request(request_id)
+    await admin.calendar_events_failed(request_id, "2026-04-22", "Cancelled")
+
+    status = admin.get_status(request_id)
+    assert status["status"] == CANCELLED
+    assert status["stage"] == CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_email_task_cancel_during_email_stage_waits_for_all_callbacks(admin_context) -> None:
+    admin, _, _, _, _ = admin_context
+    request_id = admin.submit_send_email_notifications("2026-04-22")
+    await asyncio.sleep(0)
+    events = [
+        {"id": "evt-1", "description": "a@example.com", "start": "2026-04-22T09:00:00-05:00", "end": "2026-04-22T10:00:00-05:00"},
+        {"id": "evt-2", "description": "", "start": "2026-04-22T11:00:00-05:00", "end": "2026-04-22T12:00:00-05:00"},
+        {"id": "evt-3", "description": "c@example.com", "start": "2026-04-22T13:00:00-05:00", "end": "2026-04-22T14:00:00-05:00"},
+    ]
+    await admin.calendar_events_complete(request_id, "2026-04-22", events)
+    admin.cancel_request(request_id)
+    await admin.email_draft_complete(request_id, "evt-1", "draft-1")
+    await admin.email_draft_skipped(request_id, "evt-2")
+    mid_status = admin.get_status(request_id)
+    assert mid_status["status"] == "CANCEL_REQUESTED"
+    await admin.email_draft_failed(request_id, "evt-3", "Cancelled")
+
+    status = admin.get_status(request_id)
+    assert status["status"] == CANCELLED
+    assert status["emails_completed"] == 1
+    assert status["emails_skipped"] == 1
+    assert status["emails_failed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_email_task_zero_event_day_completes_without_mail_jobs(admin_context) -> None:
+    admin, _, _, _, mail_worker = admin_context
+    request_id = admin.submit_send_email_notifications("2026-04-22")
+    await asyncio.sleep(0)
+    await admin.calendar_events_complete(request_id, "2026-04-22", [])
+
+    status = admin.get_status(request_id)
+    assert status["status"] == COMPLETED
+    assert len(mail_worker.requests) == 0
+
+
+@pytest.mark.asyncio
+async def test_email_late_callback_after_terminal_is_discarded(admin_context) -> None:
+    admin, _, _, _, _ = admin_context
+    request_id = admin.submit_send_email_notifications("2026-04-22")
+    await asyncio.sleep(0)
+    await admin.calendar_events_complete(
+        request_id,
+        "2026-04-22",
+        [{"id": "evt-1", "description": "", "start": "2026-04-22T09:00:00-05:00", "end": "2026-04-22T10:00:00-05:00"}],
+    )
+    await admin.email_draft_skipped(request_id, "evt-1")
+    before = admin.get_status(request_id)
+    await admin.email_draft_failed(request_id, "evt-1", "too late")
+    assert admin.get_status(request_id) == before

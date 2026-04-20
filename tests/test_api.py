@@ -63,6 +63,12 @@ class FakeApiOfficeAdmin:
         self.submitted_dates.append(selected_date)
         return "generated-id"
 
+    def submit_send_email_notifications(self, selected_date: str) -> str:
+        if self.queue_full:
+            raise OfficeAdminQueueFullError
+        self.submitted_dates.append(selected_date)
+        return "generated-email-id"
+
     def get_status(self, request_id: str) -> dict:
         return self.statuses.get(request_id, {"status": "UNKNOWN", "request_id": request_id})
 
@@ -120,6 +126,24 @@ def test_submit_print_calendar_events_queue_full(client: TestClient) -> None:
     assert response.status_code == 429
 
 
+def test_submit_send_email_notifications(client: TestClient) -> None:
+    response = client.post("/api/office/send-email-notifications", json={"selected_date": "2026-04-22"})
+    assert response.status_code == 202
+    assert response.json() == {"request_id": "generated-email-id"}
+    assert client.fake_office_admin.submitted_dates == ["2026-04-22"]
+
+
+def test_submit_send_email_notifications_invalid_date(client: TestClient) -> None:
+    response = client.post("/api/office/send-email-notifications", json={"selected_date": "04/22/2026"})
+    assert response.status_code == 422
+
+
+def test_submit_send_email_notifications_queue_full(client: TestClient) -> None:
+    client.fake_office_admin.queue_full = True
+    response = client.post("/api/office/send-email-notifications", json={"selected_date": "2026-04-22"})
+    assert response.status_code == 429
+
+
 def test_get_status_success(client: TestClient) -> None:
     response = client.get("/api/office/status/known")
     assert response.status_code == 200
@@ -154,4 +178,4 @@ def test_root_page_loads(client: TestClient) -> None:
     response = client.get("/")
     assert response.status_code == 200
     assert "Print Calendar Events" in response.text
-    assert "Generated documents" not in response.text
+    assert "Send Email Notifications" in response.text

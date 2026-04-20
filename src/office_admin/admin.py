@@ -9,6 +9,7 @@ from office_admin.models import (
     CANCEL_REQUESTED,
     COMPLETED,
     CREATING_EVENT_PDFS,
+    CREATING_EMAIL_DRAFTS,
     ERROR,
     GETTING_CALENDAR_EVENTS,
     PRINT_CALENDAR_EVENTS,
@@ -105,6 +106,20 @@ class OfficeAdmin:
             self._touch(task)
             for event in events:
                 self._document_worker.create_event_document(self, request_id, event)
+            return
+
+        if task["task_type"] == SEND_EMAIL_NOTIFICATIONS:
+            task["status"] = RUNNING
+            task["stage"] = CREATING_EMAIL_DRAFTS
+            task["emails_expected"] = len(events)
+            task["emails_completed"] = 0
+            task["emails_skipped"] = 0
+            task["emails_failed"] = 0
+            task["draft_ids"] = []
+            task["skipped_event_ids"] = []
+            self._touch(task)
+            for event in events:
+                self._mail_worker.create_email_draft(self, request_id, event)
             return
 
         task["status"] = COMPLETED
@@ -218,6 +233,66 @@ class OfficeAdmin:
         self._mail_worker.cancel_request(request_id)
         self._touch(task)
 
+    async def email_draft_complete(self, request_id: str, event_id: str, draft_id: str) -> None:
+        task = self._task_store.get(request_id)
+        if task is None or task["status"] in TERMINAL_STATUSES:
+            return
+
+        task["emails_completed"] += 1
+        task["draft_ids"].append(draft_id)
+        if task["cancel_requested"]:
+            if self._email_work_is_finished(task):
+                task["status"] = CANCELLED
+                task["stage"] = CANCELLED
+            self._touch(task)
+            return
+
+        if self._email_work_is_finished(task):
+            task["status"] = COMPLETED
+            task["stage"] = COMPLETED
+        self._touch(task)
+
+    async def email_draft_skipped(self, request_id: str, event_id: str) -> None:
+        task = self._task_store.get(request_id)
+        if task is None or task["status"] in TERMINAL_STATUSES:
+            return
+
+        task["emails_skipped"] += 1
+        task["skipped_event_ids"].append(event_id)
+        if task["cancel_requested"]:
+            if self._email_work_is_finished(task):
+                task["status"] = CANCELLED
+                task["stage"] = CANCELLED
+            self._touch(task)
+            return
+
+        if self._email_work_is_finished(task):
+            task["status"] = COMPLETED
+            task["stage"] = COMPLETED
+        self._touch(task)
+
+    async def email_draft_failed(self, request_id: str, event_id: str, error_text: str) -> None:
+        task = self._task_store.get(request_id)
+        if task is None or task["status"] in TERMINAL_STATUSES:
+            return
+
+        task["emails_failed"] += 1
+        if task["cancel_requested"] and error_text == "Cancelled":
+            if self._email_work_is_finished(task):
+                task["status"] = CANCELLED
+                task["stage"] = CANCELLED
+            self._touch(task)
+            return
+
+        task["status"] = ERROR
+        task["stage"] = ERROR
+        task["errors"].append(error_text)
+        self._calendar_worker.cancel_request(request_id)
+        self._document_worker.cancel_request(request_id)
+        self._printer_worker.cancel_request(request_id)
+        self._mail_worker.cancel_request(request_id)
+        self._touch(task)
+
     def _submit_task(self, task_type: str, selected_date: str) -> str:
         request_id = str(uuid.uuid4())
         item: OfficeAdminWorkItem = {
@@ -268,3 +343,7 @@ class OfficeAdmin:
     @staticmethod
     def _print_work_is_finished(task: dict[str, Any]) -> bool:
         return (task["prints_completed"] + task["prints_failed"]) == task["prints_expected"]
+
+    @staticmethod
+    def _email_work_is_finished(task: dict[str, Any]) -> bool:
+        return (task["emails_completed"] + task["emails_skipped"] + task["emails_failed"]) == task["emails_expected"]

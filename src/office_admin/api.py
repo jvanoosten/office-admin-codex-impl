@@ -21,6 +21,10 @@ class PrintCalendarEventsRequest(BaseModel):
     selected_date: date
 
 
+class SendEmailNotificationsRequest(BaseModel):
+    selected_date: date
+
+
 class SubmitResponse(BaseModel):
     request_id: str
 
@@ -60,6 +64,16 @@ async def submit_print_calendar_events(payload: PrintCalendarEventsRequest, requ
     office_admin: OfficeAdmin = request.app.state.office_admin
     try:
         request_id = office_admin.submit_print_calendar_events(payload.selected_date.isoformat())
+    except OfficeAdminQueueFullError as exc:
+        raise HTTPException(status_code=429, detail="Server is busy. Try again shortly.") from exc
+    return SubmitResponse(request_id=request_id)
+
+
+@app.post("/api/office/send-email-notifications", response_model=SubmitResponse, status_code=202)
+async def submit_send_email_notifications(payload: SendEmailNotificationsRequest, request: Request) -> SubmitResponse:
+    office_admin: OfficeAdmin = request.app.state.office_admin
+    try:
+        request_id = office_admin.submit_send_email_notifications(payload.selected_date.isoformat())
     except OfficeAdminQueueFullError as exc:
         raise HTTPException(status_code=429, detail="Server is busy. Try again shortly.") from exc
     return SubmitResponse(request_id=request_id)

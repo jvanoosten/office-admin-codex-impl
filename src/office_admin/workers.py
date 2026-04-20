@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import datetime as dt
 import json
 import logging
@@ -8,13 +9,15 @@ import os
 import re
 import subprocess
 from collections.abc import Callable
+from email.message import EmailMessage
 from pathlib import Path
 from typing import Any, Protocol, TypedDict
 
-from office_admin.models import CalendarEvent, CalendarWorkItem, DocumentWorkItem, PrinterWorkItem
+from office_admin.models import CalendarEvent, CalendarWorkItem, DocumentWorkItem, MailWorkItem, PrinterWorkItem
 
 LOGGER = logging.getLogger(__name__)
 CALENDAR_SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
+GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.compose"]
 CUSTOMER_EMAIL = "examplecompany@gmail.com"
 CUSTOMER_TITLE = "Created by: Example Company"
 COLOR_MAP = {
@@ -38,6 +41,18 @@ class CalendarEventsService(Protocol):
 
 class CalendarService(Protocol):
     def events(self) -> CalendarEventsService: ...
+
+
+class GmailDraftsService(Protocol):
+    def create(self, **kwargs: Any) -> Any: ...
+
+
+class GmailUsersService(Protocol):
+    def drafts(self) -> GmailDraftsService: ...
+
+
+class GmailService(Protocol):
+    def users(self) -> GmailUsersService: ...
 
 
 class CalendarWorker:
@@ -483,5 +498,180 @@ class PrinterWorker(_BaseStubWorker):
 
 
 class MailWorker(_BaseStubWorker):
+    _EMAIL_RE = re.compile(r"\b([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})\b")
+
+    def __init__(
+        self,
+        service_factory: Callable[[], GmailService] | None = None,
+        credentials_path: str = "gmail_credentials.json",
+        token_path: str = "gmail_token.json",
+    ) -> None:
+        super().__init__()
+        self._service_factory = service_factory or self._build_service
+        self._credentials_path = Path(credentials_path)
+        self._token_path = Path(token_path)
+        self._service: GmailService | None = None
+        self._queue: asyncio.Queue[MailWorkItem | None] = asyncio.Queue()
+        self._worker_task = asyncio.create_task(self._worker_loop())
+
     def create_email_draft(self, office_admin_ref: Any, request_id: str, event: CalendarEvent) -> None:
-        raise NotImplementedError("MailWorker is not part of Phase 1")
+        self._queue.put_nowait(
+            {
+                "office_admin_ref": office_admin_ref,
+                "request_id": request_id,
+                "event": event,
+            }
+        )
+
+    async def shutdown(self) -> None:
+        await self._queue.put(None)
+        await self._worker_task
+
+    async def _worker_loop(self) -> None:
+        while True:
+            item = await self._queue.get()
+            if item is None:
+                break
+            await self._process_item(item)
+
+    async def _process_item(self, item: MailWorkItem) -> None:
+        office_admin_ref = item["office_admin_ref"]
+        request_id = item["request_id"]
+        event = item["event"]
+        event_id = str(event["id"])
+
+        if self._cancelled.get(request_id):
+            await office_admin_ref.email_draft_failed(request_id, event_id, "Cancelled")
+            return
+
+        recipients = self._extract_recipients(event.get("description"))
+        if not recipients:
+            if self._cancelled.get(request_id):
+                await office_admin_ref.email_draft_failed(request_id, event_id, "Cancelled")
+                return
+            await office_admin_ref.email_draft_skipped(request_id, event_id)
+            return
+
+        if self._cancelled.get(request_id):
+            await office_admin_ref.email_draft_failed(request_id, event_id, "Cancelled")
+            return
+
+        try:
+            service = await self._get_service()
+            encoded_message = await self._create_encoded_message(event, recipients)
+            draft_id = await self._create_draft(service, encoded_message)
+        except Exception as exc:
+            await office_admin_ref.email_draft_failed(request_id, event_id, str(exc))
+            return
+
+        if self._cancelled.get(request_id):
+            await office_admin_ref.email_draft_failed(request_id, event_id, "Cancelled")
+            return
+
+        await office_admin_ref.email_draft_complete(request_id, event_id, draft_id)
+
+    async def _get_service(self) -> GmailService:
+        if self._service is None:
+            loop = asyncio.get_running_loop()
+            self._service = await loop.run_in_executor(None, self._service_factory)
+        return self._service
+
+    async def _create_encoded_message(self, event: CalendarEvent, recipients: list[str]) -> str:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._compose_draft_body, event, recipients)
+
+    async def _create_draft(self, service: GmailService, encoded_message: str) -> str:
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: service.users().drafts().create(userId="me", body={"message": {"raw": encoded_message}}).execute(),
+        )
+        return str(response["id"])
+
+    @classmethod
+    def _extract_recipients(cls, description: str | None) -> list[str]:
+        matches = cls._EMAIL_RE.findall(description or "")
+        seen: set[str] = set()
+        results: list[str] = []
+        for addr in matches:
+            if addr not in seen:
+                seen.add(addr)
+                results.append(addr)
+        return results
+
+    def _compose_draft_body(self, event: CalendarEvent, recipients: list[str], template: str | None = None) -> str:
+        template_text = template if template is not None else self._load_template()
+        lines = template_text.splitlines()
+        subject = (lines[0] if lines else "Example Company: Upcoming Service").strip()
+        body_template = "\n".join(lines[1:]).lstrip("\n")
+
+        body = body_template.format(
+            date=self._format_event_date(event),
+            time=self._format_event_time(event),
+            location=event.get("location") or "",
+        )
+
+        message = EmailMessage()
+        message["To"] = ", ".join(recipients)
+        message["Subject"] = subject
+        message.set_content(body)
+        return base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
+
+    @staticmethod
+    def _format_event_date(event: CalendarEvent) -> str:
+        start = event.get("start", "")
+        if not start:
+            return "Unknown date"
+        if "T" in start:
+            parsed = dt.datetime.fromisoformat(start.replace("Z", "+00:00")).astimezone()
+            return parsed.strftime("%A, %B %d, %Y").replace(" 0", " ")
+        return dt.date.fromisoformat(start).strftime("%A, %B %d, %Y").replace(" 0", " ")
+
+    @staticmethod
+    def _format_event_time(event: CalendarEvent) -> str:
+        start = event.get("start", "")
+        end = event.get("end", "")
+        if not start or not end:
+            return "Unknown time"
+        if "T" not in start or "T" not in end:
+            return "(all day)"
+        start_dt = dt.datetime.fromisoformat(start.replace("Z", "+00:00")).astimezone()
+        end_dt = dt.datetime.fromisoformat(end.replace("Z", "+00:00")).astimezone()
+        return f"{start_dt.strftime('%I:%M %p').lstrip('0')} – {end_dt.strftime('%I:%M %p').lstrip('0')}"
+
+    @staticmethod
+    def _load_template() -> str:
+        root_dir = Path(__file__).resolve().parents[2]
+        return (root_dir / "templates" / "email_notification_template").read_text(encoding="utf-8")
+
+    def _build_service(self) -> GmailService:
+        creds = None
+        try:
+            from google.auth.transport.requests import Request
+            from google.oauth2.credentials import Credentials
+            from google_auth_oauthlib.flow import InstalledAppFlow
+            from googleapiclient.discovery import build
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError(
+                "Gmail dependencies are not installed. Install the project dependencies before using the mail integration."
+            ) from exc
+
+        if self._token_path.exists():
+            creds = Credentials.from_authorized_user_file(str(self._token_path), GMAIL_SCOPES)
+
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+
+        if not creds or not creds.valid:
+            flow = InstalledAppFlow.from_client_secrets_file(str(self._credentials_path), GMAIL_SCOPES)
+            creds = flow.run_local_server(port=0)
+            self._token_path.write_text(creds.to_json(), encoding="utf-8")
+        elif hasattr(creds, "to_json") and not self._token_path.exists():
+            self._token_path.write_text(creds.to_json(), encoding="utf-8")
+        elif self._token_path.exists():
+            try:
+                json.loads(self._token_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                raise RuntimeError("gmail_token.json is not valid JSON") from exc
+
+        return build("gmail", "v1", credentials=creds)
