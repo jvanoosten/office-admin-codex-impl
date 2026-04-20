@@ -4,12 +4,14 @@ import asyncio
 import datetime as dt
 import json
 import logging
+import os
 import re
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol, TypedDict
 
-from office_admin.models import CalendarEvent, DocumentWorkItem
+from office_admin.models import CalendarEvent, CalendarWorkItem, DocumentWorkItem, PrinterWorkItem
 
 LOGGER = logging.getLogger(__name__)
 CALENDAR_SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
@@ -411,6 +413,12 @@ class DocumentWorker(_BaseStubWorker):
 
 
 class PrinterWorker(_BaseStubWorker):
+    def __init__(self, print_adapter: Callable[[str], None] | None = None) -> None:
+        super().__init__()
+        self._print_adapter = print_adapter or self._default_print_adapter
+        self._queue: asyncio.Queue[PrinterWorkItem | None] = asyncio.Queue()
+        self._worker_task = asyncio.create_task(self._worker_loop())
+
     def print_document(
         self,
         office_admin_ref: Any,
@@ -418,7 +426,60 @@ class PrinterWorker(_BaseStubWorker):
         event_id: str,
         document_path: str,
     ) -> None:
-        raise NotImplementedError("PrinterWorker is not part of Phase 1")
+        if not document_path:
+            raise ValueError("PrinterWorker requires a non-empty document path")
+        self._queue.put_nowait(
+            {
+                "office_admin_ref": office_admin_ref,
+                "request_id": request_id,
+                "event_id": event_id,
+                "document_path": document_path,
+            }
+        )
+
+    async def shutdown(self) -> None:
+        await self._queue.put(None)
+        await self._worker_task
+
+    async def _worker_loop(self) -> None:
+        while True:
+            item = await self._queue.get()
+            if item is None:
+                break
+            await self._process_item(item)
+
+    async def _process_item(self, item: PrinterWorkItem) -> None:
+        office_admin_ref = item["office_admin_ref"]
+        request_id = item["request_id"]
+        event_id = item["event_id"]
+        document_path = item["document_path"]
+
+        if self._cancelled.get(request_id):
+            await office_admin_ref.print_failed(request_id, event_id, "Cancelled")
+            return
+
+        if not Path(document_path).exists():
+            await office_admin_ref.print_failed(request_id, event_id, f"File not found: {document_path}")
+            return
+
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, self._print_adapter, document_path)
+        except Exception as exc:
+            await office_admin_ref.print_failed(request_id, event_id, str(exc))
+            return
+
+        if self._cancelled.get(request_id):
+            await office_admin_ref.print_failed(request_id, event_id, "Cancelled")
+            return
+
+        await office_admin_ref.print_complete(request_id, event_id, document_path)
+
+    @staticmethod
+    def _default_print_adapter(document_path: str) -> None:
+        if os.name == "nt":
+            raise RuntimeError("Default printer adapter is not implemented for Windows")
+        subprocess.run(["lp", document_path], check=True)
 
 
 class MailWorker(_BaseStubWorker):

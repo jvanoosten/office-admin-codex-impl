@@ -48,6 +48,19 @@ class DocumentWorkItem(TypedDict):
     event: CalendarEvent
 
 
+class CalendarWorkItem(TypedDict):
+    office_admin_ref: Any
+    request_id: str
+    selected_date: str
+
+
+class PrinterWorkItem(TypedDict):
+    office_admin_ref: Any
+    request_id: str
+    event_id: str
+    document_path: str
+
+
 def utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -73,6 +86,7 @@ def make_task_entry(request_id: str, task_type: str, selected_date: str) -> dict
         "prints_completed": 0,
         "prints_failed": 0,
         "document_paths": [],
+        "document_results": [],
         "emails_expected": 0,
         "emails_completed": 0,
         "emails_skipped": 0,
