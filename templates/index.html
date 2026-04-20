@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Office Admin</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <section class="hero">
+        <p class="eyebrow">Phase 1</p>
+        <h1>Office Admin</h1>
+        <p class="lede">
+          Submit a print-calendar-events request, monitor the async workflow, and inspect the
+          normalized calendar events returned for that day.
+        </p>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h2>Print Calendar Events</h2>
+            <p>Choose a day and submit the first workflow slice.</p>
+          </div>
+        </div>
+        <form id="print-form" class="form-row">
+          <label for="print-date">Selected date</label>
+          <input id="print-date" name="selected_date" type="date" required />
+          <button type="submit">Submit</button>
+        </form>
+        <p id="message" class="message" role="status" aria-live="polite"></p>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h2>Tracked Tasks</h2>
+            <p>Active and recent requests for this page session.</p>
+          </div>
+        </div>
+        <div id="tasks" class="task-list"></div>
+      </section>
+    </main>
+
+    <template id="task-template">
+      <article class="task-card">
+        <div class="task-topline">
+          <div>
+            <p class="task-type">Print Calendar Events</p>
+            <h3 class="task-id"></h3>
+          </div>
+          <button class="cancel-button" type="button">Cancel</button>
+        </div>
+        <dl class="task-meta">
+          <div>
+            <dt>Date</dt>
+            <dd class="task-date"></dd>
+          </div>
+          <div>
+            <dt>Status</dt>
+            <dd class="task-status"></dd>
+          </div>
+          <div>
+            <dt>Stage</dt>
+            <dd class="task-stage"></dd>
+          </div>
+        </dl>
+        <p class="task-progress"></p>
+        <div class="task-errors"></div>
+        <div class="task-events"></div>
+      </article>
+    </template>
+
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>
