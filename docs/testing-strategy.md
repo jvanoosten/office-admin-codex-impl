@@ -225,10 +225,10 @@ Must test:
 ### MailWorker
 
 Must test:
-- `_extract_recipients`: single `mailto:` → correct address returned
-- `_extract_recipients`: multiple `mailto:` links → all unique addresses in order
+- `_extract_recipients`: single email address in description text → correct address returned
+- `_extract_recipients`: multiple addresses in description text → all unique addresses in order
 - `_extract_recipients`: duplicate addresses → deduplicated
-- `_extract_recipients`: no `mailto:` → empty list
+- `_extract_recipients`: no email addresses → empty list
 - `_extract_recipients`: None description → empty list
 - event with recipients → Gmail API called → `email_draft_complete` (mock service)
 - event with no recipients → `email_draft_skipped`; Gmail API not called

@@ -235,7 +235,7 @@ All callbacks are `async` methods. They check for terminal status first and disc
    - if `cancel_requested`: set `status = CANCELLED`, `stage = CANCELLED`
    - otherwise: set `status = COMPLETED`, `stage = COMPLETED`
 
-Note: skipped events are a normal outcome (no `mailto:` found). They count toward the expected total and trigger finalization when all events have been processed.
+Note: skipped events are a normal outcome (no email addresses found in the description). They count toward the expected total and trigger finalization when all events have been processed.
 
 ---
 

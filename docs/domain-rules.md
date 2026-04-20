@@ -108,15 +108,15 @@ Required:
 
 ### Recipient Extraction
 - recipients are extracted ONLY from `event.description`
-- must match `mailto:` format:
-  - example: `mailto:user@example.com`
+- extraction scans the full description text for email address patterns
+- not limited to `mailto:` links
 
 ### Multiple Recipients
-- if multiple `mailto:` links exist:
+- if multiple email addresses exist in the description:
   - include all in the same draft
 
 ### No Recipients
-- if no `mailto:` references found:
+- if no email addresses are found:
   - skip event
   - do not create draft
 
@@ -368,10 +368,10 @@ Example: `3f2504e0_evt001_team-standup.pdf`
 
 ### Recipient Extraction
 - recipients are extracted from `event.description` only; other event fields are not searched
-- the extraction pattern is: `mailto:` followed by a valid email address
-- multiple `mailto:` links in one description yield multiple recipients
+- the extraction pattern matches email addresses found anywhere in the text
+- multiple addresses in one description yield multiple recipients
 - duplicate addresses are removed; first occurrence is kept
-- events with no `mailto:` references → `email_draft_skipped` callback (not `email_draft_failed`)
+- events with no email addresses → `email_draft_skipped` callback (not `email_draft_failed`)
 
 ### Draft Content Template
 - email content is loaded from `templates/email_notification_template` at compose time
