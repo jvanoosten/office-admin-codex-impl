@@ -12,6 +12,10 @@ const STAGE_LABELS = {
 const TERMINAL_STATUSES = new Set(["COMPLETED", "CANCELLED", "ERROR"]);
 const tasks = new Map();
 const pollers = new Map();
+const TASK_LABELS = {
+  PRINT_CALENDAR_EVENTS: "Print Calendar Events",
+  SEND_EMAIL_NOTIFICATIONS: "Send Email Notifications",
+};
 
 function toLocalDateString(offsetDays = 0) {
   const value = new Date();
@@ -59,6 +63,7 @@ function renderTask(task) {
     card.querySelector(".cancel-button").addEventListener("click", () => cancelTask(task.request_id));
   }
 
+  card.querySelector(".task-type").textContent = TASK_LABELS[task.task_type] || task.task_type;
   card.querySelector(".task-id").textContent = task.request_id;
   card.querySelector(".task-date").textContent = task.selected_date;
   card.querySelector(".task-status").textContent = task.status;
@@ -82,7 +87,8 @@ function renderTask(task) {
 
   const documentsNode = card.querySelector(".task-documents");
   documentsNode.innerHTML = "";
-  if (Array.isArray(task.document_paths) && task.document_paths.length > 0) {
+  documentsNode.hidden = !(Array.isArray(task.document_paths) && task.document_paths.length > 0);
+  if (!documentsNode.hidden) {
     const heading = document.createElement("p");
     heading.className = "events-heading";
     heading.textContent = "Generated documents";
@@ -98,6 +104,31 @@ function renderTask(task) {
     }
     documentsNode.appendChild(list);
   }
+
+  const emailsNode = card.querySelector(".task-emails");
+  emailsNode.innerHTML = "";
+  const hasEmailResults = (task.draft_ids?.length || 0) > 0 || (task.skipped_event_ids?.length || 0) > 0;
+  emailsNode.hidden = !hasEmailResults;
+  if (hasEmailResults) {
+    const heading = document.createElement("p");
+    heading.className = "events-heading";
+    heading.textContent = "Email results";
+    emailsNode.appendChild(heading);
+
+    const list = document.createElement("ul");
+    list.className = "event-list";
+    for (const draftId of task.draft_ids || []) {
+      const item = document.createElement("li");
+      item.innerHTML = `<strong>Draft created</strong><span>${draftId}</span>`;
+      list.appendChild(item);
+    }
+    for (const skippedEventId of task.skipped_event_ids || []) {
+      const item = document.createElement("li");
+      item.innerHTML = `<strong>Skipped event</strong><span>${skippedEventId}</span>`;
+      list.appendChild(item);
+    }
+    emailsNode.appendChild(list);
+  }
 }
 
 function buildProgressLabel(task) {
@@ -105,7 +136,13 @@ function buildProgressLabel(task) {
     return "Waiting for calendar results";
   }
   if (task.calendar_event_count === 0) {
-    return "No printable events found";
+    return "No events found";
+  }
+  if (task.task_type === "SEND_EMAIL_NOTIFICATIONS") {
+    if (task.emails_expected > 0) {
+      return `${task.emails_completed} of ${task.emails_expected} drafts created, ${task.emails_skipped} skipped`;
+    }
+    return `${task.calendar_event_count} printable calendar event${task.calendar_event_count === 1 ? "" : "s"} found`;
   }
   if (task.stage === "PRINTING_EVENT_PDFS" || task.prints_expected > 0) {
     return `${task.prints_completed} of ${task.prints_expected} PDFs printed`;
@@ -179,7 +216,29 @@ async function submitPrintForm(event) {
   }
 }
 
+async function submitEmailForm(event) {
+  event.preventDefault();
+  const selectedDate = document.querySelector("#email-date").value;
+
+  try {
+    const data = await apiFetch("/api/office/send-email-notifications", {
+      method: "POST",
+      body: JSON.stringify({ selected_date: selectedDate }),
+    });
+    setMessage(`Submitted request ${data.request_id}`);
+    startPolling(data.request_id);
+  } catch (error) {
+    if (error.status === 429) {
+      setMessage("Server busy, please try again", true);
+      return;
+    }
+    setMessage(error.message, true);
+  }
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   document.querySelector("#print-date").value = toLocalDateString();
+  document.querySelector("#email-date").value = toLocalDateString(1);
   document.querySelector("#print-form").addEventListener("submit", submitPrintForm);
+  document.querySelector("#email-form").addEventListener("submit", submitEmailForm);
 });

@@ -9,11 +9,11 @@
   <body>
     <main class="page">
       <section class="hero">
-        <p class="eyebrow">Phase 2</p>
+        <p class="eyebrow">Phase 4</p>
         <h1>Office Admin</h1>
         <p class="lede">
-          Submit a print-calendar-events request, monitor the async workflow, and inspect the PDF
-          documents generated for the selected day.
+          Run either office workflow from one page: print the day’s calendar events or create Gmail
+          draft notifications for upcoming services.
         </p>
       </section>
 
@@ -35,6 +35,20 @@
       <section class="panel">
         <div class="panel-header">
           <div>
+            <h2>Send Email Notifications</h2>
+            <p>Choose a day and create one Gmail draft per event with extracted recipients.</p>
+          </div>
+        </div>
+        <form id="email-form" class="form-row">
+          <label for="email-date">Selected date</label>
+          <input id="email-date" name="selected_date" type="date" required />
+          <button type="submit">Submit</button>
+        </form>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <div>
             <h2>Tracked Tasks</h2>
             <p>Active and recent requests for this page session.</p>
           </div>
@@ -47,7 +61,7 @@
       <article class="task-card">
         <div class="task-topline">
           <div>
-            <p class="task-type">Print Calendar Events</p>
+            <p class="task-type"></p>
             <h3 class="task-id"></h3>
           </div>
           <button class="cancel-button" type="button">Cancel</button>
@@ -69,6 +83,7 @@
         <p class="task-progress"></p>
         <div class="task-errors"></div>
         <div class="task-documents"></div>
+        <div class="task-emails"></div>
       </article>
     </template>
 
