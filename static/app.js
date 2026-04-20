@@ -80,23 +80,23 @@ function renderTask(task) {
     errors.appendChild(errorList);
   }
 
-  const eventsNode = card.querySelector(".task-events");
-  eventsNode.innerHTML = "";
-  if (Array.isArray(task.calendar_events) && task.calendar_events.length > 0) {
+  const documentsNode = card.querySelector(".task-documents");
+  documentsNode.innerHTML = "";
+  if (Array.isArray(task.document_paths) && task.document_paths.length > 0) {
     const heading = document.createElement("p");
     heading.className = "events-heading";
-    heading.textContent = "Retrieved calendar events";
-    eventsNode.appendChild(heading);
+    heading.textContent = "Generated documents";
+    documentsNode.appendChild(heading);
 
     const list = document.createElement("ul");
     list.className = "event-list";
-    for (const event of task.calendar_events) {
+    for (const documentPath of task.document_paths) {
       const item = document.createElement("li");
-      const title = event.summary || "(No Title)";
-      item.innerHTML = `<strong>${title}</strong><span>${event.start} to ${event.end}</span>`;
+      const fileName = documentPath.split("/").pop();
+      item.innerHTML = `<strong>${fileName}</strong><span>${documentPath}</span>`;
       list.appendChild(item);
     }
-    eventsNode.appendChild(list);
+    documentsNode.appendChild(list);
   }
 }
 
@@ -107,9 +107,10 @@ function buildProgressLabel(task) {
   if (task.calendar_event_count === 0) {
     return "No printable events found";
   }
-  return `${task.calendar_event_count} printable calendar event${
-    task.calendar_event_count === 1 ? "" : "s"
-  } retrieved`;
+  if (task.documents_expected > 0) {
+    return `${task.documents_completed} of ${task.documents_expected} PDFs created`;
+  }
+  return `${task.calendar_event_count} printable calendar event${task.calendar_event_count === 1 ? "" : "s"} found`;
 }
 
 async function pollTask(requestId) {

@@ -4,20 +4,30 @@ import asyncio
 import datetime as dt
 import json
 import logging
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol, TypedDict
 
-from office_admin.models import CalendarEvent
+from office_admin.models import CalendarEvent, DocumentWorkItem
 
 LOGGER = logging.getLogger(__name__)
 CALENDAR_SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
-
-
-class CalendarWorkItem(TypedDict):
-    office_admin_ref: Any
-    request_id: str
-    selected_date: str
+CUSTOMER_EMAIL = "examplecompany@gmail.com"
+CUSTOMER_TITLE = "Created by: Example Company"
+COLOR_MAP = {
+    "1": (0.475, 0.525, 0.796),
+    "2": (0.153, 0.941, 0.729),
+    "3": (0.557, 0.141, 0.667),
+    "4": (0.902, 0.486, 0.451),
+    "5": (0.965, 0.749, 0.149),
+    "6": (0.957, 0.318, 0.118),
+    "7": (0.012, 0.608, 0.898),
+    "8": (0.380, 0.380, 0.380),
+    "9": (0.247, 0.318, 0.710),
+    "10": (0.043, 0.502, 0.263),
+    "11": (0.835, 0.000, 0.000),
+}
 
 
 class CalendarEventsService(Protocol):
@@ -202,8 +212,202 @@ class _BaseStubWorker:
 
 
 class DocumentWorker(_BaseStubWorker):
+    def __init__(
+        self,
+        output_dir: str = "reports",
+        prune_age_days: int = 7,
+        pdf_generator: Callable[[CalendarEvent, Path], None] | None = None,
+    ) -> None:
+        super().__init__()
+        self._output_dir = Path(output_dir)
+        self._prune_age_days = prune_age_days
+        self._pdf_generator = pdf_generator or self._generate_pdf
+        self._queue: asyncio.Queue[DocumentWorkItem | None] = asyncio.Queue()
+        self._worker_task = asyncio.create_task(self._worker_loop())
+
     def create_event_document(self, office_admin_ref: Any, request_id: str, event: CalendarEvent) -> None:
-        raise NotImplementedError("DocumentWorker is not part of Phase 1")
+        event_id = event.get("id")
+        if not event_id:
+            raise ValueError("DocumentWorker requires an event id")
+        self._queue.put_nowait(
+            {
+                "office_admin_ref": office_admin_ref,
+                "request_id": request_id,
+                "event": event,
+            }
+        )
+
+    async def shutdown(self) -> None:
+        await self._queue.put(None)
+        await self._worker_task
+
+    async def _worker_loop(self) -> None:
+        while True:
+            item = await self._queue.get()
+            if item is None:
+                break
+            await self._process_item(item)
+
+    async def _process_item(self, item: DocumentWorkItem) -> None:
+        office_admin_ref = item["office_admin_ref"]
+        request_id = item["request_id"]
+        event = item["event"]
+        event_id = str(event["id"])
+
+        if self._cancelled.get(request_id):
+            await office_admin_ref.document_failed(request_id, event_id, "Cancelled")
+            return
+
+        output_path = self._build_output_path(request_id, event)
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, self._generate_document, event, output_path)
+        except Exception as exc:
+            await office_admin_ref.document_failed(request_id, event_id, str(exc))
+            return
+
+        if self._cancelled.get(request_id):
+            await office_admin_ref.document_failed(request_id, event_id, "Cancelled")
+            return
+
+        await office_admin_ref.document_complete(request_id, event_id, str(output_path))
+
+    def _generate_document(self, event: CalendarEvent, output_path: Path) -> None:
+        self._output_dir.mkdir(parents=True, exist_ok=True)
+        self._prune_stale_pdfs()
+        self._pdf_generator(event, output_path)
+
+    def _build_output_path(self, request_id: str, event: CalendarEvent) -> Path:
+        event_id = self._sanitize_fragment(str(event["id"]), 20)
+        summary = self._sanitize_fragment(event.get("summary") or "event", 40)
+        return self._output_dir / f"{request_id[:8]}_{event_id}_{summary}.pdf"
+
+    @staticmethod
+    def _sanitize_fragment(value: str, max_length: int) -> str:
+        normalized = re.sub(r"[^A-Za-z0-9]+", "-", value).strip("-").lower()
+        normalized = re.sub(r"-{2,}", "-", normalized)
+        return (normalized or "event")[:max_length]
+
+    def _prune_stale_pdfs(self) -> None:
+        if not self._output_dir.exists():
+            return
+
+        cutoff = dt.datetime.now().timestamp() - (self._prune_age_days * 24 * 60 * 60)
+        for entry in self._output_dir.iterdir():
+            if entry.is_dir() or entry.suffix.lower() != ".pdf":
+                continue
+            try:
+                if entry.stat().st_mtime < cutoff:
+                    entry.unlink()
+            except OSError:
+                LOGGER.warning("Failed to remove stale PDF", extra={"path": str(entry)})
+
+    @staticmethod
+    def _generate_pdf(event: CalendarEvent, output_path: Path) -> None:
+        from reportlab.lib.pagesizes import letter
+        from reportlab.pdfgen import canvas
+
+        page_width, page_height = letter
+        pdf = canvas.Canvas(str(output_path), pagesize=letter)
+        left = 54
+        right = page_width - 54
+        header_height = 36
+        color = COLOR_MAP.get(event.get("colorId"), (0.530, 0.810, 0.980))
+
+        pdf.setFillColorRGB(*color)
+        pdf.rect(0, page_height - header_height, 72, header_height, fill=1, stroke=0)
+        pdf.setFillColorRGB(0, 0, 0)
+        pdf.setFont("Helvetica", 10)
+        pdf.drawRightString(right, page_height - 23, CUSTOMER_EMAIL)
+
+        title = event.get("summary") or "(No Title)"
+        pdf.setFont("Helvetica-Bold", 24)
+        y = page_height - 72
+        for line in DocumentWorker._wrap_text(title, 34):
+            pdf.drawString(left, y, line)
+            y -= 28
+
+        pdf.setFillColorRGB(0.45, 0.45, 0.45)
+        pdf.setFont("Helvetica", 9)
+        pdf.drawString(left, y, CUSTOMER_TITLE)
+        y -= 36
+        pdf.setFillColorRGB(0, 0, 0)
+
+        sections = [
+            ("TIME", DocumentWorker._format_time_range(event)),
+            ("DATE", DocumentWorker._format_date(event.get("start", ""))),
+            ("WHERE", event.get("location") or "No location"),
+            ("DESCRIPTION", event.get("description") or "No description"),
+        ]
+        for label, value in sections:
+            pdf.setFillColorRGB(0.45, 0.45, 0.45)
+            pdf.setFont("Helvetica", 8)
+            pdf.drawString(left, y, label)
+            y -= 16
+            pdf.setFillColorRGB(0, 0, 0)
+            pdf.setFont("Helvetica-Bold" if label in {"TIME", "DATE", "WHERE"} else "Helvetica", 18 if label != "DESCRIPTION" else 12)
+            for line in DocumentWorker._wrap_text(value, 55 if label != "DESCRIPTION" else 80):
+                pdf.drawString(left, y, line)
+                y -= 20 if label != "DESCRIPTION" else 14
+            y -= 18
+
+        pdf.showPage()
+        pdf.save()
+
+    @staticmethod
+    def _wrap_text(value: str, width: int) -> list[str]:
+        words = value.split()
+        if not words:
+            return [""]
+        lines = []
+        current = words[0]
+        for word in words[1:]:
+            candidate = f"{current} {word}"
+            if len(candidate) <= width:
+                current = candidate
+            else:
+                lines.append(current)
+                current = word
+        lines.append(current)
+        return lines
+
+    @staticmethod
+    def _format_date(value: str) -> str:
+        if not value:
+            return "Unknown date"
+        try:
+            parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return DocumentWorker._format_display_date(parsed.astimezone().date())
+        except ValueError:
+            try:
+                return DocumentWorker._format_display_date(dt.date.fromisoformat(value))
+            except ValueError:
+                return value
+
+    @staticmethod
+    def _format_display_date(value: dt.date) -> str:
+        return value.strftime("%a %b %d, %Y").replace(" 0", " ")
+
+    @staticmethod
+    def _format_time_range(event: CalendarEvent) -> str:
+        start = event.get("start", "")
+        end = event.get("end", "")
+        if "T" not in start or "T" not in end:
+            return "All Day"
+        try:
+            start_dt = dt.datetime.fromisoformat(start.replace("Z", "+00:00")).astimezone()
+            end_dt = dt.datetime.fromisoformat(end.replace("Z", "+00:00")).astimezone()
+        except ValueError:
+            return f"{start} - {end}"
+
+        return f"{DocumentWorker._format_time(start_dt)} - {DocumentWorker._format_time(end_dt)}"
+
+    @staticmethod
+    def _format_time(value: dt.datetime) -> str:
+        formatted = value.strftime("%I:%M%p").lower()
+        if formatted.startswith("0"):
+            formatted = formatted[1:]
+        return formatted.replace(":00", "")
 
 
 class PrinterWorker(_BaseStubWorker):

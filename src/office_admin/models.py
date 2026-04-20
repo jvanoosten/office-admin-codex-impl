@@ -42,6 +42,12 @@ class OfficeAdminWorkItem(TypedDict):
     selected_date: str
 
 
+class DocumentWorkItem(TypedDict):
+    office_admin_ref: Any
+    request_id: str
+    event: CalendarEvent
+
+
 def utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
