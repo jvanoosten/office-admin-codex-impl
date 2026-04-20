@@ -12,6 +12,7 @@ from office_admin.models import (
     ERROR,
     GETTING_CALENDAR_EVENTS,
     PRINT_CALENDAR_EVENTS,
+    PRINTING_EVENT_PDFS,
     RUNNING,
     SEND_EMAIL_NOTIFICATIONS,
     TERMINAL_STATUSES,
@@ -100,6 +101,7 @@ class OfficeAdmin:
             task["documents_completed"] = 0
             task["documents_failed"] = 0
             task["document_paths"] = []
+            task["document_results"] = []
             self._touch(task)
             for event in events:
                 self._document_worker.create_event_document(self, request_id, event)
@@ -135,6 +137,7 @@ class OfficeAdmin:
 
         task["documents_completed"] += 1
         task["document_paths"].append(document_path)
+        task["document_results"].append({"event_id": event_id, "document_path": document_path})
 
         if task["cancel_requested"]:
             if self._document_work_is_finished(task):
@@ -144,8 +147,12 @@ class OfficeAdmin:
             return
 
         if task["documents_completed"] == task["documents_expected"]:
-            task["status"] = COMPLETED
-            task["stage"] = COMPLETED
+            task["stage"] = PRINTING_EVENT_PDFS
+            task["prints_expected"] = len(task["document_paths"])
+            task["prints_completed"] = 0
+            task["prints_failed"] = 0
+            for result in task["document_results"]:
+                self._printer_worker.print_document(self, request_id, result["event_id"], result["document_path"])
         self._touch(task)
 
     async def document_failed(self, request_id: str, event_id: str, error_text: str) -> None:
@@ -157,6 +164,46 @@ class OfficeAdmin:
 
         if task["cancel_requested"] and error_text == "Cancelled":
             if self._document_work_is_finished(task):
+                task["status"] = CANCELLED
+                task["stage"] = CANCELLED
+            self._touch(task)
+            return
+
+        task["status"] = ERROR
+        task["stage"] = ERROR
+        task["errors"].append(error_text)
+        self._calendar_worker.cancel_request(request_id)
+        self._document_worker.cancel_request(request_id)
+        self._printer_worker.cancel_request(request_id)
+        self._mail_worker.cancel_request(request_id)
+        self._touch(task)
+
+    async def print_complete(self, request_id: str, event_id: str, document_path: str) -> None:
+        task = self._task_store.get(request_id)
+        if task is None or task["status"] in TERMINAL_STATUSES:
+            return
+
+        task["prints_completed"] += 1
+        if task["cancel_requested"]:
+            if self._print_work_is_finished(task):
+                task["status"] = CANCELLED
+                task["stage"] = CANCELLED
+            self._touch(task)
+            return
+
+        if task["prints_completed"] == task["prints_expected"]:
+            task["status"] = COMPLETED
+            task["stage"] = COMPLETED
+        self._touch(task)
+
+    async def print_failed(self, request_id: str, event_id: str, error_text: str) -> None:
+        task = self._task_store.get(request_id)
+        if task is None or task["status"] in TERMINAL_STATUSES:
+            return
+
+        task["prints_failed"] += 1
+        if task["cancel_requested"] and error_text == "Cancelled":
+            if self._print_work_is_finished(task):
                 task["status"] = CANCELLED
                 task["stage"] = CANCELLED
             self._touch(task)
@@ -217,3 +264,7 @@ class OfficeAdmin:
     @staticmethod
     def _document_work_is_finished(task: dict[str, Any]) -> bool:
         return (task["documents_completed"] + task["documents_failed"]) == task["documents_expected"]
+
+    @staticmethod
+    def _print_work_is_finished(task: dict[str, Any]) -> bool:
+        return (task["prints_completed"] + task["prints_failed"]) == task["prints_expected"]

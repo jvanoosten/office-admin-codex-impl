@@ -107,6 +107,9 @@ function buildProgressLabel(task) {
   if (task.calendar_event_count === 0) {
     return "No printable events found";
   }
+  if (task.stage === "PRINTING_EVENT_PDFS" || task.prints_expected > 0) {
+    return `${task.prints_completed} of ${task.prints_expected} PDFs printed`;
+  }
   if (task.documents_expected > 0) {
     return `${task.documents_completed} of ${task.documents_expected} PDFs created`;
   }
